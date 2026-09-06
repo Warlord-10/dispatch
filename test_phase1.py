@@ -25,14 +25,14 @@ async def main():
         await reset_supply()
         t = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=t, base_url="http://t") as c:
-            uniq = uuid.uuid4().int % 10000
+            uniq = uuid.uuid4().int % 10**8   # wide enough that reruns do not collide
 
-            r = await c.post("/riders", json={"name": "Rhea", "phone_number": f"98{uniq:04d}0001"})
+            r = await c.post("/riders", json={"name": "Rhea", "phone_number": f"9{uniq:08d}1"})
             assert r.status_code == 201, r.text
             rider = r.json()
 
             r = await c.post("/drivers", json={
-                "name": "Sam", "phone_number": f"98{uniq:04d}0002",
+                "name": "Sam", "phone_number": f"9{uniq:08d}2",
                 "car_number": "ka-01 ab 1234", "car_model": "Swift"})
             assert r.status_code == 201, r.text
             driver = r.json()
@@ -40,7 +40,7 @@ async def main():
             assert driver["car_number"] == "KA01AB1234"
 
             # duplicate phone -> 409 from the unique index
-            r = await c.post("/riders", json={"name": "Dup", "phone_number": f"+9198{uniq:04d}0001"})
+            r = await c.post("/riders", json={"name": "Dup", "phone_number": f"+919{uniq:08d}1"})
             assert r.status_code == 409, r.text
 
             # bad coordinates rejected at the trust boundary

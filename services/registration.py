@@ -29,7 +29,14 @@ async def _insert(session: AsyncSession, row: Driver | Rider, phone_number: str)
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        raise AlreadyRegistered(phone_number) from exc
+        # Only a duplicate phone means "already registered". Mapping every
+        # IntegrityError here hides unrelated violations (a primary-key
+        # collision reports itself as a taken phone number) and sends you
+        # debugging the wrong constraint.
+        constraint = getattr(getattr(exc.orig, "__cause__", None), "constraint_name", "") or ""
+        if "phone_number" in constraint:
+            raise AlreadyRegistered(phone_number) from exc
+        raise
     await session.refresh(row)
     return row
 

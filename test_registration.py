@@ -15,8 +15,8 @@ async def main():
 
     # unique per run: these rows persist, so fixed numbers only
     # pass against a fresh database
-    u = uuid.uuid4().int % 10000
-    phone_a, phone_b = f"97{u:04d}0001", f"97{u:04d}0002"
+    u = uuid.uuid4().int % 10**8
+    phone_a, phone_b = f"9{u:08d}1", f"9{u:08d}2"
 
     # phone normalization collapses to one canonical form
     assert RiderRegister(name="A", phone_number="+91 98765-43210").phone_number == "9876543210"

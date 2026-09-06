@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import Driver, Ride
 from schemas.rides import RideRequest
 from services.dispatch_engine import NoDriverFound, match_ride
+from services.drivers import free_driver
 
 TERMINAL = ("completed", "cancelled")
 
@@ -25,15 +26,6 @@ async def get_ride(session: AsyncSession, ride_id: uuid.UUID | int) -> Ride:
     return ride
 
 
-async def _free_driver(session: AsyncSession, ride: Ride) -> None:
-    """Return the driver to the pool. No-op for a ride nobody was assigned to."""
-    if ride.driver_id is None:
-        return
-    driver = await session.get(Driver, ride.driver_id)
-    if driver is not None:
-        driver.status = "available"
-
-
 async def book_ride(session: AsyncSession, data: RideRequest, rider_id: int) -> Ride:
     ride = Ride(
         rider_id=rider_id,
@@ -49,9 +41,6 @@ async def book_ride(session: AsyncSession, data: RideRequest, rider_id: int) -> 
     try:
         await match_ride(session, ride.id)
     except NoDriverFound:
-        # The ride is already committed, so raising here would report failure
-        # for a row that exists. Leave it 'pending' and let the caller poll —
-        # Phase 5 is where a worker retries it properly.
         pass
 
     await session.refresh(ride)
@@ -59,8 +48,6 @@ async def book_ride(session: AsyncSession, data: RideRequest, rider_id: int) -> 
 
 
 async def accept_ride(session: AsyncSession, ride_id: uuid.UUID | int, driver_id: int) -> Ride:
-    # ponytail: unused in Phase 1's auto-assign flow. Kept for the offer/accept
-    # model, where this becomes a compare-and-set against status='pending'.
     ride = await get_ride(session, ride_id)
     if ride.status in TERMINAL:
         raise InvalidRideState(f"ride is already {ride.status}")
@@ -79,7 +66,8 @@ async def complete_ride(session: AsyncSession, ride_id: uuid.UUID | int) -> Ride
         raise InvalidRideState(f"cannot complete a ride that is {ride.status}")
 
     ride.status = "completed"
-    await _free_driver(session, ride)
+    if ride.driver_id is not None:
+        await free_driver(session, ride.driver_id)
     await session.commit()
     await session.refresh(ride)
     return ride
@@ -91,7 +79,8 @@ async def cancel_ride(session: AsyncSession, ride_id: uuid.UUID | int) -> Ride:
         raise InvalidRideState(f"ride is already {ride.status}")
 
     ride.status = "cancelled"
-    await _free_driver(session, ride)
+    if ride.driver_id is not None:
+        await free_driver(session, ride.driver_id)
     await session.commit()
     await session.refresh(ride)
     return ride
