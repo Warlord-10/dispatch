@@ -2,6 +2,8 @@ from pydantic import BaseModel
 
 from enums import DriverStatus
 from schemas.geo import Latitude, Longitude
+from schemas.registration import DriverOut
+from schemas.rides import RideOut
 
 
 class DriverStatusUpdate(BaseModel):
@@ -25,3 +27,15 @@ class DriverPresence(BaseModel):
     lng: float | None = None
     last_seen_epoch: float | None = None
     seconds_since_ping: float | None = None
+
+
+class DriverSession(BaseModel):
+    """Everything a driver app needs to redraw itself after (re)connecting.
+
+    The socket only carries changes; a change sent while the socket was down is
+    gone. So on every connect the app fetches this first, then applies deltas.
+    """
+
+    driver: DriverOut               # status here is Postgres, the source of truth
+    presence: DriverPresence        # what the dispatch index currently believes
+    current_ride: RideOut | None    # the one assigned ride, if any

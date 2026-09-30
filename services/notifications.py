@@ -1,54 +1,45 @@
-"""How a ride offer reaches a driver's device.
+"""Tell the people on a ride that it changed.
 
-Deliberately abstract. RabbitMQ distributes work among *our* workers; it does
-not reach phones. The transport is WebSocket or push, and that is the next step
-— so the dispatch engine depends on this interface and nothing else.
-
-The offer rows in Redis are the source of truth for "who was approached".
-A notification is a nudge on top; if it is lost, the driver's next poll still
-sees the offer.
+Best effort by design. It runs after the change is committed, so it must never
+fail the request that made the change: the rider's cancel succeeded whether or
+not their phone hears about it. A missed push is repaired by the client's resync
+on reconnect (GET /rides/{id}, GET /drivers/{id}/session). A crash between the
+commit and the push loses it outright; that is the dual write the Phase 8 outbox
+closes.
 """
 
-from abc import ABC, abstractmethod
+from aio_pika.exceptions import PublishError
 
-from schemas.offers import RideOffer
-
-
-class DriverNotifier(ABC):
-    @abstractmethod
-    async def send_ride_offer(self, driver_id: int, offer: RideOffer) -> None:
-        """Push one offer to one driver."""
-
-    @abstractmethod
-    async def withdraw_ride_offer(self, driver_id: int, ride_id) -> None:
-        """Tell a driver the offer is gone — someone else took it, or it expired."""
+from enums import Recipient
+from messaging.push_queue import PushMessage, push_queue
+from models import Ride
+from schemas.rides import RideOut
+from services.connections import gateways_for
 
 
-class LoggingNotifier(DriverNotifier):
-    """Placeholder until the WebSocket layer exists. Makes the fan-out observable
-    and lets the whole engine be tested without a transport."""
-
-    def __init__(self):
-        self.sent: list[tuple[int, RideOffer]] = []
-        self.withdrawn: list[tuple[int, str]] = []
-
-    async def send_ride_offer(self, driver_id: int, offer: RideOffer) -> None:
-        self.sent.append((driver_id, offer))
-        print(f"[offer] ride={offer.ride_id} -> driver={driver_id}")
-
-    async def withdraw_ride_offer(self, driver_id: int, ride_id) -> None:
-        self.withdrawn.append((driver_id, str(ride_id)))
-        print(f"[withdraw] ride={ride_id} -> driver={driver_id}")
+async def push(recipient: Recipient, recipient_id: int, body: dict) -> bool:
+    """Deliver to whichever gateway holds their socket. False if none does."""
+    gateway = (await gateways_for(recipient, [recipient_id])).get(str(recipient_id))
+    if gateway is None:
+        return False
+    try:
+        await push_queue.publish(
+            gateway, PushMessage(recipient=recipient, recipient_id=recipient_id, body=body)
+        )
+    except PublishError:
+        return False  # that gateway died; its queue went with it
+    return True
 
 
-_notifier: DriverNotifier = LoggingNotifier()
-
-
-def get_notifier() -> DriverNotifier:
-    return _notifier
-
-
-def set_notifier(notifier: DriverNotifier) -> None:
-    """Swap in the WebSocket implementation when it exists, or a fake in tests."""
-    global _notifier
-    _notifier = notifier
+async def push_ride_update(ride: Ride) -> None:
+    """The whole ride, not a delta: the client replaces its copy, so an update
+    that arrives late or twice still leaves it correct."""
+    body = {"type": "ride_update", "ride": RideOut.model_validate(ride).model_dump(mode="json")}
+    targets = [(Recipient.RIDER, ride.rider_id)]
+    if ride.driver_id is not None:
+        targets.append((Recipient.DRIVER, ride.driver_id))
+    for recipient, recipient_id in targets:
+        try:
+            await push(recipient, recipient_id, body)
+        except Exception as exc:  # Redis or broker trouble: log it, never fail the caller
+            print(f"push failed: ride {ride.id} to {recipient} {recipient_id}: {exc!r}")

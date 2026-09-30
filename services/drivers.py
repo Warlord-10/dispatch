@@ -11,9 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import STALE_AFTER_S
-from enums import DriverStatus
-from models import Driver
-from schemas.drivers import DriverPing, DriverPresence, DriverStatusUpdate
+from enums import DriverStatus, RideStatus
+from models import Driver, Ride
+from schemas.drivers import DriverPing, DriverPresence, DriverSession, DriverStatusUpdate
+from schemas.registration import DriverOut
+from schemas.rides import RideOut
 from services import geo_index
 
 
@@ -88,6 +90,29 @@ async def get_presence(driver_id: int) -> DriverPresence:
         lng=None if pos is None else pos[0],
         last_seen_epoch=None if pos is None else pos[2],
         seconds_since_ping=None if pos is None else round(now - pos[2], 1),
+    )
+
+
+async def get_driver_session(session: AsyncSession, driver_id: int) -> DriverSession:
+    """Resync state for a reconnecting driver: who they are, what the index
+    thinks of them, and the ride they are on.
+
+    ponytail: no live offers. An offer lives 15s and the app drops it on
+    expires_at, so one missed during a reconnect is simply missed, the same
+    call as not withdrawing offers. Needs a driver -> offers index if wanted.
+    """
+    driver = await get_driver(session, driver_id)  # 404 for an unknown driver
+    # At most one row, and the database guarantees it: the partial unique index
+    # rides_one_assigned_per_driver. scalar_one_or_none would raise otherwise.
+    ride = (
+        await session.execute(
+            select(Ride).where(Ride.driver_id == driver_id, Ride.status == RideStatus.ASSIGNED)
+        )
+    ).scalar_one_or_none()
+    return DriverSession(
+        driver=DriverOut.model_validate(driver),
+        presence=await get_presence(driver_id),
+        current_ride=None if ride is None else RideOut.model_validate(ride),
     )
 
 

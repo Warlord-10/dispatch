@@ -6,7 +6,10 @@ you scale the two independently.
 """
 
 import asyncio
+import time
 from datetime import datetime, timezone
+
+from aio_pika.exceptions import PublishError
 
 from config import OFFER_TTL_S
 from db import Session
@@ -18,8 +21,11 @@ from services.dispatch_engine import (
     RideTimedOut,
     dispatch_ride,
 )
+from enums import Recipient
+from messaging.push_queue import PushMessage, push_queue
+from schemas.offers import RideOffer
+from services.connections import gateways_for
 from services.offers import record_offers
-from messaging.offer_queue import OfferQueuePayload, offer_queue
 
 
 async def handle_ride_requested(payload: RideQueuePayload) -> None:
@@ -38,12 +44,19 @@ async def handle_ride_requested(payload: RideQueuePayload) -> None:
 
     # Session closed before publishing: holding a pooled Postgres connection
     # through N publishes starves the other in-flight rides (pool 10, prefetch 20).
+    offered: list[str] = []
     if driver_ids:
-        offered_at = await record_offers(payload.ride_id, driver_ids)
+        offered_at = time.time()
         expires_at = datetime.fromtimestamp(offered_at + OFFER_TTL_S, timezone.utc)
+        gateways = await gateways_for(Recipient.DRIVER, driver_ids)
 
         for driver_id in driver_ids:
-            offer = OfferQueuePayload(
+            gateway = gateways.get(driver_id)
+            if gateway is None:
+                # No live socket: they cannot see an offer, so don't spend them.
+                # They stay eligible for the next round, when they may be back.
+                continue
+            offer = RideOffer(
                 ride_id=payload.ride_id,
                 rider_id=payload.rider_id,
                 driver_id=int(driver_id),
@@ -53,14 +66,29 @@ async def handle_ride_requested(payload: RideQueuePayload) -> None:
                 dest_lng=payload.dest_lng,
                 expires_at=expires_at,
             )
-            await offer_queue.publish(offer)
+            msg = PushMessage(
+                recipient=Recipient.DRIVER,
+                recipient_id=int(driver_id),
+                body={"type": "ride_offer", **offer.model_dump(mode="json")},
+            )
+            try:
+                await push_queue.publish(gateway, msg)
+            except PublishError:
+                continue  # that gateway died; its exclusive queue went with it
+            offered.append(driver_id)
+
+        # Recorded after publishing, and only the offers that reached a gateway:
+        # a driver recorded but never offered would be excluded for nothing.
+        # The reverse risk, a driver accepting before being recorded, needs a
+        # human tap inside the milliseconds between these two lines.
+        await record_offers(payload.ride_id, offered, now=offered_at)
 
     # Unconditional: an empty round still schedules the next one, and a ride
-    # taken during the next 15s is caught by the None check on its way back.
+    # taken during the next 15s is caught on its way back.
     await ride_retry_queue.publish(payload)
 
     print(f"[matcher] ride={payload.ride_id} round {payload.round_number}: "
-          f"offered to {len(driver_ids)} driver(s)")
+          f"offered to {len(offered)} of {len(driver_ids)} nearby driver(s)")
 
 
 async def main() -> None:

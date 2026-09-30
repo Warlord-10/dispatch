@@ -17,6 +17,7 @@ from models import Driver, Ride
 from redis_client import redis_client
 from redis_keys import ride_offers
 from services import geo_index
+from services.notifications import push_ride_update
 
 
 class RideAlreadyTaken(Exception):
@@ -68,10 +69,6 @@ async def check_offer(ride_id, driver_id: int, now: float | None = None) -> None
         raise OfferExpired(f"offer for ride {ride_id} expired")
 
 
-async def clear_offers(ride_id) -> None:
-    await redis_client.delete(ride_offers(ride_id))
-
-
 
 async def accept_ride_offer(
     session: AsyncSession, ride_id, driver_id: int
@@ -117,9 +114,10 @@ async def accept_ride_offer(
     await session.commit()
 
     await geo_index.set_status(driver_id, DriverStatus.ASSIGNED)
-    await clear_offers(ride_id)
 
-    return await session.get(Ride, ride_id)
+    ride = await session.get(Ride, ride_id)
+    await push_ride_update(ride)  # the rider learns they have a driver
+    return ride
 
 
 async def reject_ride_offer(session: AsyncSession, ride_id, driver_id: int) -> None:

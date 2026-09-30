@@ -38,3 +38,9 @@ OFFER_TTL_S = 15                     # how long a driver has to accept
 MAX_OFFER_ROUNDS = 3                 # then the ride is timed_out
 APPROACHED_TTL_S = 15 * 60           # approached hash self-cleans; must outlive
                                      # OFFER_TTL_S * MAX_OFFER_ROUNDS (45s)
+
+# --- websocket gateway ---
+GATEWAY_CONN_TTL_S = 30              # driver -> gateway entry; refreshed on every
+                                     # socket ping (PING_INTERVAL_S), so a gateway
+                                     # that dies stops refreshing and its entries
+                                     # expire on their own

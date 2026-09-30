@@ -21,10 +21,12 @@ DRIVERS_STATUS = f"{NS}:drivers:status"
 
 
 # HASH — driver_id -> epoch the offer was sent, for one ride. Keys exclude the
-# driver from later rounds; values bound the accept window. TTL set on write;
-# a ride reaching a terminal state should delete it.
+# driver from later rounds; values bound the accept window. Reclaimed by TTL
+# only, never deleted when the ride ends: late answers must still find their
+# entry, so a losing driver hears 409 "taken", not 403 "never offered".
 def ride_offers(ride_id) -> str:
     return f"{NS}:ride:{ride_id}:offered"
+
 
 # STRING — "lng,lat,epoch" for one driver. Reclaimed by native TTL, so there is
 # no sweeper for position or liveness. The key's existence means "we know where
@@ -32,3 +34,13 @@ def ride_offers(ride_id) -> str:
 # different questions, and a TTL can only answer one of them.
 def driver_position(driver_id) -> str:
     return f"{NS}:driver:{driver_id}:position"
+
+
+# HASH — driver_id -> gateway id holding their socket. Per-field TTL (HEXPIRE,
+# GATEWAY_CONN_TTL_S) refreshed on every socket ping; removed on disconnect,
+# but only by the gateway that owns the entry. A gateway killed without
+# cleanup stops refreshing, so its entries expire by themselves.
+DRIVER_WEBSOCKET_CONN = f"{NS}:driver:websocket:connection"
+
+# HASH — rider_id -> gateway id. Same lifecycle as DRIVER_WEBSOCKET_CONN.
+RIDER_WEBSOCKET_CONN = f"{NS}:rider:websocket:connection"

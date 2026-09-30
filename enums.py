@@ -27,6 +27,13 @@ class RideStatus(StrEnum):
         return (cls.COMPLETED, cls.CANCELLED, cls.TIMED_OUT)
 
 
+class Recipient(StrEnum):
+    """Whose socket. One gateway holds both kinds."""
+
+    DRIVER = "driver"
+    RIDER = "rider"
+
+
 def sql_values(enum_cls) -> str:
     """Render an enum as a SQL tuple, so CHECK constraints cannot drift from code."""
     return str(tuple(m.value for m in enum_cls))

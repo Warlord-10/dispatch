@@ -24,6 +24,15 @@ class Ride(Base):
         # key and read back their ride. NULLs are distinct in Postgres, so
         # requests without a key never collide.
         UniqueConstraint("rider_id", "idempotency_key", name="rides_idempotency_key"),
+        # The hard invariant, held by storage rather than by code: one driver,
+        # at most one assigned ride. The accept compare-and-set already
+        # guarantees it; this catches the next bug that doesn't.
+        Index(
+            "rides_one_assigned_per_driver",
+            "driver_id",
+            unique=True,
+            postgresql_where=f"status = '{RideStatus.ASSIGNED}'",
+        ),
     )
 
     # UUID because ride ids go to clients and get sharded in Phase 9.

@@ -231,3 +231,4 @@ async def sweeper_loop() -> None:
         except Exception as exc:  # a dead sweeper must not take the app down
             print(f"sweeper error: {exc!r}")
         await asyncio.sleep(SWEEP_INTERVAL_S)
+

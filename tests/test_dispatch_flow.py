@@ -147,11 +147,26 @@ async def main():
             assert await redis_client.zcard(DRIVERS_AVAILABLE_GEO) == 2
             print("7. winner removed from the dispatch index, losers untouched")
 
+            # what a reconnecting driver sees
+            r = await c.get(f"/drivers/{winner['driver_id']}/session")
+            assert r.status_code == 200, r.text
+            sess = r.json()
+            assert sess["driver"]["status"] == "assigned"
+            assert sess["current_ride"]["id"] == ride["id"], sess
+            assert sess["presence"]["online"] is True
+            loser = next(d for d in dids if d != winner["driver_id"])
+            assert (await c.get(f"/drivers/{loser}/session")).json()["current_ride"] is None
+            assert (await c.get("/drivers/999999999/session")).status_code == 404
+            print("7b. session: winner gets their assigned ride back, losers none, unknown driver 404")
+
             # completing frees them, position recovered from their own key
             r = await c.post(f"/rides/{ride['id']}/complete")
             assert r.status_code == 200 and r.json()["status"] == "completed", r.text
             assert await redis_client.zcard(DRIVERS_AVAILABLE_GEO) == 3
             print("8. completion re-added the driver using their position key")
+            sess = (await c.get(f"/drivers/{winner['driver_id']}/session")).json()
+            assert sess["current_ride"] is None and sess["driver"]["status"] == "available", sess
+            print("8b. session after completion: no current ride, available")
 
             # a taken ride stops the loop, even when its last round comes due
             async with Session() as s:
