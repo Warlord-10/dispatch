@@ -8,6 +8,7 @@ Phase 5 will be able to call into services/ without an HTTP request.
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from enums import DriverStatus
 from models import Driver, Rider
 from schemas.registration import DriverRegister, RiderRegister
 
@@ -57,7 +58,7 @@ async def register_driver(session: AsyncSession, data: DriverRegister) -> Driver
             phone_number=data.phone_number,
             car_number=data.car_number,
             car_model=data.car_model,
-            status="offline",
+            status=DriverStatus.OFFLINE,
         ),
         data.phone_number,
     )

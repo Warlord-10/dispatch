@@ -1,4 +1,10 @@
-"""Run: uv run python test_registration.py  (needs docker compose up -d)"""
+"""Run: uv run python tests/test_registration.py  (needs docker compose up -d)"""
+
+import pathlib
+import sys
+
+# tests live in tests/, the app lives one level up
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import asyncio
 import uuid

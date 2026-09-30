@@ -1,32 +1,43 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, String, func
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db import Base
-
-STATUSES = ("pending", "assigned", "completed", "cancelled")
+from enums import RideStatus, sql_values
 
 
 class Ride(Base):
     __tablename__ = "rides"
     __table_args__ = (
         CheckConstraint(
-            f"status in {STATUSES}", name="rides_status_valid"
+            f"status in {sql_values(RideStatus)}", name="rides_status_valid"
         ),
-        Index("rides_pending_idx", "status", postgresql_where="status = 'pending'"),
+        Index(
+            "rides_pending_idx",
+            "status",
+            postgresql_where=f"status = '{RideStatus.PENDING}'",
+        ),
+        # Scoped per rider: a global key would let one rider replay another's
+        # key and read back their ride. NULLs are distinct in Postgres, so
+        # requests without a key never collide.
+        UniqueConstraint("rider_id", "idempotency_key", name="rides_idempotency_key"),
     )
 
     # UUID because ride ids go to clients and get sharded in Phase 9.
     # Changing a primary key type later is the one migration worth avoiding.
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # NULL = the client sent no Idempotency-Key. Never generated server-side:
+    # a key the client does not hold is a key it can never retry with.
+    idempotency_key: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    request_hash: Mapped[str | None] = mapped_column(String(64))
 
     rider_id: Mapped[int] = mapped_column(ForeignKey("riders.id"), index=True)
     driver_id: Mapped[int | None] = mapped_column(ForeignKey("drivers.id"), index=True)
 
-    status: Mapped[str] = mapped_column(String(16), default="pending")
+    status: Mapped[str] = mapped_column(String(16), default=RideStatus.PENDING)
 
     pickup_lng: Mapped[float] = mapped_column(Float)
     pickup_lat: Mapped[float] = mapped_column(Float)

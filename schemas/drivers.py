@@ -1,21 +1,27 @@
-from typing import Literal
+from pydantic import BaseModel
 
-from pydantic import BaseModel, model_validator
-
+from enums import DriverStatus
 from schemas.geo import Latitude, Longitude
 
 
 class DriverStatusUpdate(BaseModel):
-    """Demo stand-in for the real location ping endpoint (Phase 1)."""
+    """Eligibility only. Position arrives via the location ping, which is the
+    sole writer of driver coordinates now that Postgres no longer stores them."""
 
-    status: Literal["offline", "available", "assigned"]
-    lat: Latitude | None = None
-    lng: Longitude | None = None
+    status: DriverStatus
 
-    @model_validator(mode="after")
-    def location_required_when_available(self):
-        # A driver with no coordinates is invisible to match_ride, so going
-        # 'available' without them would look like a silent no-op.
-        if self.status == "available" and (self.lat is None or self.lng is None):
-            raise ValueError("lat and lng are required to go available")
-        return self
+
+class DriverPing(BaseModel):
+    lat: Latitude
+    lng: Longitude
+
+
+class DriverPresence(BaseModel):
+    driver_id: int
+    status: DriverStatus | None      # None = never seen by the index
+    online: bool                     # pinged inside the staleness window
+    dispatchable: bool               # available AND online
+    lat: float | None = None
+    lng: float | None = None
+    last_seen_epoch: float | None = None
+    seconds_since_ping: float | None = None

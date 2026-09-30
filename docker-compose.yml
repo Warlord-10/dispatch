@@ -23,5 +23,15 @@ services:
       interval: 5s
       retries: 10
 
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5673:5672"     # folio-rabbitmq owns 5672 on this machine
+      - "15673:15672"   # management UI
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
+      interval: 5s
+      retries: 20
+
 volumes:
   pgdata:

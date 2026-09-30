@@ -1,40 +1,58 @@
-import uuid
-from datetime import datetime, timezone
+"""Fan-out: turn a pending ride into offers to nearby drivers.
+
+Runs inside the matcher worker, not in an HTTP request — which is why nothing
+here imports FastAPI and every function takes an explicit session.
+"""
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import MAX_OFFER_ROUNDS
+from enums import RideStatus
 from models import Ride
-from services.drivers import assign_driver
+from services import offers
 from services.geo_index import search_drivers_in_radius
+from messaging.ride_queue import RideQueuePayload
+from services.ride_booking import timed_out_ride
 
 
-class NoDriverFound(Exception):
-    """Raised when no available driver is nearby."""
+# Outcomes of a round, not failures. The worker catches all three and acks;
+# only an unexpected error may escape to the DLQ.
+class RideNotPending(Exception):
+    """Accepted or cancelled since the last round: stop matching it."""
 
 
-async def match_ride(session: AsyncSession, ride_id: uuid.UUID | int) -> Ride:
-    """Assign the nearest dispatchable driver. Redis does the ranking now.
+class NoDriverAvailable(Exception):
+    """Nobody new within the widest radius this round: try the next round."""
 
-    The haversine/equirectangular SQL this used to run is gone: the geo index
-    returns candidates already sorted by true distance.
+
+class RideTimedOut(Exception):
+    """Out of rounds: the ride is now timed_out."""
+
+
+async def dispatch_ride(session: AsyncSession, payload: RideQueuePayload) -> list[str]:
+    """Decide one round for a ride: the nearest available drivers not yet
+    approached, closest first. Raises one of the outcomes above otherwise.
+
+    Safe to run twice on the same ride: at-least-once delivery means this WILL
+    be re-run after a worker crash.
     """
-    ride = await session.get(Ride, ride_id)
+    ride = await session.get(Ride, payload.ride_id)
     if ride is None:
-        raise ValueError(f"ride {ride_id} not found")
+        raise ValueError(f"ride {payload.ride_id} not found")
 
-    drivers = await search_drivers_in_radius(ride.pickup_lat, ride.pickup_lng)
+    if ride.status != RideStatus.PENDING:
+        raise RideNotPending(f"ride {ride.id} is {ride.status}")
+
+    if payload.round_number > MAX_OFFER_ROUNDS:
+        if await timed_out_ride(session, ride.id):
+            raise RideTimedOut(f"ride {ride.id} timed out after {MAX_OFFER_ROUNDS} rounds")
+        # The compare-and-set lost: a driver accepted in the last instant.
+        raise RideNotPending(f"ride {ride.id} was taken just before timing out")
+
+    approached = await offers.already_offered(ride.id)
+    drivers = await search_drivers_in_radius(
+        ride.pickup_lat, ride.pickup_lng, exclude=approached
+    )
     if not drivers:
-        raise NoDriverFound("no available driver found")
-
-    # geosearch returns member names as strings
-    driver_id = int(drivers[0])
-
-    ride.driver_id = driver_id
-    ride.status = "assigned"
-    ride.assigned_at = datetime.now(timezone.utc)
-
-    # same session, so this commit persists the ride changes too
-    await assign_driver(session, driver_id, ride.id)
-
-    await session.refresh(ride)
-    return ride
+        raise NoDriverAvailable(f"no new drivers for ride {ride.id} in round {payload.round_number}")
+    return drivers

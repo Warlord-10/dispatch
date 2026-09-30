@@ -25,10 +25,11 @@ import time
 import httpx
 from sqlalchemy import delete, select, text, update
 
-from cache import cache
 from db import Session, init_db
+from enums import DriverStatus
 from models import Driver, Ride, Rider
-from services.geo_index import AVAILABLE_DRIVERS_KEY
+from redis_client import redis_client
+from redis_keys import DRIVERS_AVAILABLE_GEO
 
 BASE = "http://127.0.0.1:8100"
 CITY = (12.85, 13.10, 77.45, 77.75)  # Bengaluru bounding box
@@ -52,7 +53,7 @@ async def seed(n_drivers):
         s.add_all([
             Driver(
                 id=i, name=f"d{i}", phone_number=f"6{i:09d}",
-                car_number=f"KA01AA{i:04d}", car_model="Swift", status="available",
+                car_number=f"KA01AA{i:04d}", car_model="Swift", status=DriverStatus.AVAILABLE,
                 lat=random.uniform(lo_lat, hi_lat), lng=random.uniform(lo_lng, hi_lng),
             )
             for i in range(1, n_drivers + 1)
@@ -76,7 +77,7 @@ async def _geo_sync(n, reset=False):
     line that measures nothing.
     """
     if reset:
-        await cache.delete(AVAILABLE_DRIVERS_KEY)
+        await redis_client.delete(DRIVERS_AVAILABLE_GEO)
     async with Session() as s:
         rows = (await s.execute(
             select(Driver.id, Driver.lng, Driver.lat).where(Driver.id <= n)
@@ -85,7 +86,7 @@ async def _geo_sync(n, reset=False):
     for did, lng, lat in rows:
         flat += [lng, lat, did]
     if flat:
-        await cache.geoadd(AVAILABLE_DRIVERS_KEY, flat)
+        await redis_client.geoadd(DRIVERS_AVAILABLE_GEO, flat)
 
 
 _COORDS: dict[int, tuple[float, float]] = {}
@@ -109,9 +110,9 @@ async def set_available(n):
     so a Postgres-only top-up benchmarks an empty index.
     """
     async with Session() as s:
-        await s.execute(update(Driver).values(status="offline"))
+        await s.execute(update(Driver).values(status=DriverStatus.OFFLINE))
         await s.execute(
-            update(Driver).where(Driver.id <= n).values(status="available")
+            update(Driver).where(Driver.id <= n).values(status=DriverStatus.AVAILABLE)
         )
         await s.commit()
 
@@ -120,10 +121,10 @@ async def set_available(n):
     for i in range(1, n + 1):
         lat, lng = coords[i]
         members.extend([lng, lat, i])
-    pipe = cache.pipeline()
-    pipe.delete(AVAILABLE_DRIVERS_KEY)
+    pipe = redis_client.pipeline()
+    pipe.delete(DRIVERS_AVAILABLE_GEO)
     if members:
-        pipe.geoadd(AVAILABLE_DRIVERS_KEY, members)
+        pipe.geoadd(DRIVERS_AVAILABLE_GEO, members)
     await pipe.execute()
     await _geo_sync(n, reset=True)
 
@@ -133,7 +134,7 @@ async def keep_supply(n, stop):
     pool back up so we measure the scan over a constant n, not a draining one."""
     while not stop.is_set():
         async with Session() as s:
-            await s.execute(update(Driver).where(Driver.id <= n).values(status="available"))
+            await s.execute(update(Driver).where(Driver.id <= n).values(status=DriverStatus.AVAILABLE))
             await s.commit()
         # no DEL here: that would leave the index momentarily empty mid-run
         await _geo_sync(n)

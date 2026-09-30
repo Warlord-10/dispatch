@@ -3,6 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from enums import RideStatus
 from schemas.geo import Latitude, Longitude
 
 
@@ -27,10 +28,16 @@ class RideOut(BaseModel):
     id: uuid.UUID
     rider_id: int
     driver_id: int | None
-    status: str
+    status: RideStatus
     pickup_lng: float
     pickup_lat: float
     dest_lng: float
     dest_lat: float
     requested_at: datetime
     assigned_at: datetime | None
+
+
+class RideAction(BaseModel):
+    """Who is acting. ponytail: driver_id in the body until there is auth."""
+
+    driver_id: int
