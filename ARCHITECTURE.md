@@ -321,6 +321,8 @@ reads the status first and decides in Python:
 ```
 main.py                 app, startup (rebuild status index, connect broker, sweeper),
                         the one place domain exceptions become HTTP status codes
+errors.py               DispatchError, the base for every expected refusal
+log_setup.py            one log format for all processes, with ctx= correlation
 gateway.py              the WebSocket gateway app: driver and rider sockets, pings, pushes
 config.py               every tunable number, in one file
 enums.py                DriverStatus, RideStatus; imports nothing, so every layer can use it
@@ -349,6 +351,44 @@ The rule that shaped the layout: **services never know they are behind HTTP.**
 Status codes live only in `main.py`. That is why the worker, a separate process
 with no requests, can call the same `dispatch_ride`, `timed_out_ride` and
 `record_offers` as the API.
+
+
+### Errors and logging
+
+**Every error response has one shape:**
+```json
+{"detail": "offer for ride 7f3a… expired 4s ago (offers can be accepted for 15s)",
+ "code": "offer_expired", "request_id": "7f64a7e0b562"}
+```
+- `code` is derived from the exception class (`OfferExpired` → `offer_expired`).
+  Clients branch on it, never on the wording of `detail`, which is free to improve.
+  It separates what the status alone cannot: four different 409s
+  (`ride_already_taken`, `driver_unavailable`, `offer_expired`, `invalid_ride_state`).
+- Expected refusals subclass `DispatchError` ([errors.py](errors.py)) and map to a
+  status in one table in `main.py`, the only file that knows about HTTP.
+- An unexpected exception becomes a JSON **500** with `code: internal_error`, no
+  internals in the body, and its traceback logged under the same request id.
+
+**Every log line says which process wrote it and what it was working on:**
+```
+2026-10-01 14:02:11,305 INFO    worker pid=4120 ctx=ride=7f3a… services.workers.dispatch_worker: round 1: offered to 3 of 3 nearby driver(s)
+```
+`ctx` is the request id in the API (taken from `X-Request-ID` if the client sent
+one, and returned in that header), the ride id in the worker, and the socket owner
+in the gateway (`driver=7`). Refusals log at INFO, because they are the rules
+working; failures that lose something log at ERROR.
+
+**Queue failures are logged once, with the ride.** A message that fails is
+dead-lettered and logged by the queue wrapper: a malformed body as one line, a
+real failure with its traceback and `ctx=ride=<id>`. A ride message for a ride
+that doesn't exist raises `RideNotFound` rather than a bare `ValueError`.
+
+**The gateway survives bad input and its own failures.** A malformed frame gets
+an `error` reply and the socket stays open. An unexpected failure closes the
+socket with 1011 (the client reconnects), and a failing cleanup can never hide
+the original error.
+
+Verified in [tests/test_errors.py](tests/test_errors.py).
 
 ---
 
@@ -679,6 +719,7 @@ Tests are plain scripts, each printing numbered steps:
 uv run python tests/test_dispatch_flow.py
 uv run python tests/test_gateway.py      # starts two gateways on :8801/:8802
 uv run python tests/test_driver_index.py
+uv run python tests/test_errors.py
 uv run python tests/test_idempotency.py
 uv run python tests/test_phase1.py
 uv run python tests/test_races.py        # starts its own 4-process API on :8765

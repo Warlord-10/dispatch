@@ -8,6 +8,8 @@ commit and the push loses it outright; that is the dual write the Phase 8 outbox
 closes.
 """
 
+import logging
+
 from aio_pika.exceptions import PublishError
 
 from enums import Recipient
@@ -15,6 +17,8 @@ from messaging.push_queue import PushMessage, push_queue
 from models import Ride
 from schemas.rides import RideOut
 from services.connections import gateways_for
+
+log = logging.getLogger(__name__)
 
 
 async def push(recipient: Recipient, recipient_id: int, body: dict) -> bool:
@@ -42,4 +46,5 @@ async def push_ride_update(ride: Ride) -> None:
         try:
             await push(recipient, recipient_id, body)
         except Exception as exc:  # Redis or broker trouble: log it, never fail the caller
-            print(f"push failed: ride {ride.id} to {recipient} {recipient_id}: {exc!r}")
+            log.warning("push of ride %s to %s %s failed, client will resync: %r",
+                        ride.id, recipient, recipient_id, exc)

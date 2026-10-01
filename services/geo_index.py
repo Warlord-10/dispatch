@@ -13,6 +13,7 @@ Only the available geo set needs sweeping, because geo members never expire.
 """
 
 import asyncio
+import logging
 import time
 
 from config import (
@@ -25,6 +26,8 @@ from config import (
 from enums import DriverStatus
 from redis_client import redis_client
 from redis_keys import DRIVERS_AVAILABLE_GEO, DRIVERS_STATUS, driver_position
+
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -229,6 +232,6 @@ async def sweeper_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a dead sweeper must not take the app down
-            print(f"sweeper error: {exc!r}")
+            log.exception("sweeper pass failed, retrying in %ds", SWEEP_INTERVAL_S)
         await asyncio.sleep(SWEEP_INTERVAL_S)
 

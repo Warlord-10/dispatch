@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -7,10 +8,13 @@ from aio_pika.abc import (
     AbstractRobustChannel,
     AbstractRobustQueue,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from config import OFFER_TTL_S, PREFETCH
+from log_setup import log_context
 from messaging.connection import rabbitmq
+
+log = logging.getLogger(__name__)
 
 
 class RideQueuePayload(BaseModel):
@@ -21,6 +25,11 @@ class RideQueuePayload(BaseModel):
     dest_lat: float
     dest_lng: float
     round_number: int
+
+
+class _Malformed(Exception):
+    def __init__(self, body: bytes):
+        self.body = body
 
 
 class RideQueue:
@@ -77,10 +86,27 @@ class RideQueue:
 
         async def on_message(message: AbstractIncomingMessage) -> None:
             # requeue=False: a bad payload or a failing handler goes to the DLQ
-            # instead of looping. Validation runs inside, so garbage is rejected
+            # instead of looping. Validation runs first, so garbage is rejected
             # before the handler touches the database.
-            async with message.process(requeue=False):
-                await handler(RideQueuePayload.model_validate_json(message.body))
+            #
+            # process() rejects on any exception and then re-raises it. Catching
+            # it out here logs each dead-letter once, with the ride id, instead
+            # of an anonymous traceback from inside aio_pika.
+            token = log_context.set("-")
+            try:
+                async with message.process(requeue=False):
+                    try:
+                        payload = RideQueuePayload.model_validate_json(message.body)
+                    except ValidationError as exc:
+                        raise _Malformed(message.body) from exc  # raise, so process() rejects
+                    log_context.set(f"ride={payload.ride_id}")
+                    await handler(payload)
+            except _Malformed as exc:
+                log.error("malformed message on %s, dead-lettered: %.300r", self.name, exc.body)
+            except Exception:
+                log.exception("failed on %s, dead-lettered", self.name)
+            finally:
+                log_context.reset(token)
 
         await queue.consume(on_message)
 

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import APPROACHED_TTL_S, OFFER_TTL_S
 from enums import DriverStatus, RideStatus
+from errors import DispatchError
 from models import Driver, Ride
 from redis_client import redis_client
 from redis_keys import ride_offers
@@ -20,19 +21,19 @@ from services import geo_index
 from services.notifications import push_ride_update
 
 
-class RideAlreadyTaken(Exception):
+class RideAlreadyTaken(DispatchError):
     """Another driver won the race for this ride."""
 
 
-class DriverUnavailable(Exception):
+class DriverUnavailable(DispatchError):
     """This driver is not in a state to take a ride."""
 
 
-class NotOffered(Exception):
+class NotOffered(DispatchError):
     """This driver was never offered this ride."""
 
 
-class OfferExpired(Exception):
+class OfferExpired(DispatchError):
     """The driver answered after the accept window closed."""
 
 
@@ -65,8 +66,12 @@ async def check_offer(ride_id, driver_id: int, now: float | None = None) -> None
     offered_at = await redis_client.hget(ride_offers(ride_id), str(driver_id))
     if offered_at is None:
         raise NotOffered(f"ride {ride_id} was not offered to driver {driver_id}")
-    if now - float(offered_at) > OFFER_TTL_S:
-        raise OfferExpired(f"offer for ride {ride_id} expired")
+    late_by = now - float(offered_at) - OFFER_TTL_S
+    if late_by > 0:
+        raise OfferExpired(
+            f"offer for ride {ride_id} expired {late_by:.0f}s ago "
+            f"(offers can be accepted for {OFFER_TTL_S}s)"
+        )
 
 
 
@@ -97,7 +102,10 @@ async def accept_ride_offer(
     )
     if claimed_driver.first() is None:
         await session.rollback()
-        raise DriverUnavailable(f"driver {driver_id} is not available")
+        raise DriverUnavailable(
+            f"driver {driver_id} must be available to accept a ride "
+            f"(already on a ride, or offline)"
+        )
 
     claimed_ride = await session.execute(
         update(Ride)
@@ -109,7 +117,7 @@ async def accept_ride_offer(
     )
     if claimed_ride.first() is None:
         await session.rollback()  # also releases the driver claim above
-        raise RideAlreadyTaken(f"ride {ride_id} is no longer pending")
+        raise RideAlreadyTaken(f"ride {ride_id} was already taken by another driver, or is no longer open")
 
     await session.commit()
 

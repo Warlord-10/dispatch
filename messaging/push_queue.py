@@ -12,6 +12,7 @@ worthless after OFFER_TTL_S, and a ride update missed is repaired by the client'
 resync on reconnect.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 
 import aio_pika
@@ -21,6 +22,8 @@ from pydantic import BaseModel
 from config import OFFER_TTL_S, PREFETCH
 from enums import Recipient
 from messaging.connection import rabbitmq
+
+log = logging.getLogger(__name__)
 
 
 class PushMessage(BaseModel):
@@ -68,8 +71,13 @@ class PushQueue:
         await queue.bind(exchange, routing_key=gateway_id)
 
         async def on_message(message: AbstractIncomingMessage) -> None:
-            async with message.process(requeue=False):
-                await handler(PushMessage.model_validate_json(message.body))
+            # No DLQ here: a push that fails is dropped (the client resyncs), but
+            # never silently.
+            try:
+                async with message.process(requeue=False):
+                    await handler(PushMessage.model_validate_json(message.body))
+            except Exception:
+                log.exception("push dropped: %.300r", message.body)
 
         await queue.consume(on_message)
 

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import STALE_AFTER_S
+from errors import DispatchError
 from enums import DriverStatus, RideStatus
 from models import Driver, Ride
 from schemas.drivers import DriverPing, DriverPresence, DriverSession, DriverStatusUpdate
@@ -19,7 +20,7 @@ from schemas.rides import RideOut
 from services import geo_index
 
 
-class DriverNotFound(Exception):
+class DriverNotFound(DispatchError):
     pass
 
 

@@ -6,12 +6,14 @@ you scale the two independently.
 """
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 
 from aio_pika.exceptions import PublishError
 
 from config import OFFER_TTL_S
+from log_setup import setup_logging
 from db import Session
 from messaging.connection import rabbitmq
 from messaging.ride_queue import RideQueuePayload, ride_queue, ride_retry_queue
@@ -27,6 +29,8 @@ from schemas.offers import RideOffer
 from services.connections import gateways_for
 from services.offers import record_offers
 
+log = logging.getLogger(__name__)
+
 
 async def handle_ride_requested(payload: RideQueuePayload) -> None:
     payload.round_number += 1
@@ -37,7 +41,7 @@ async def handle_ride_requested(payload: RideQueuePayload) -> None:
         except (RideNotPending, RideTimedOut) as outcome:
             # The loop ends here. Return (ack), never raise: raising means
             # "this message failed" and would park a normal outcome in the DLQ.
-            print(f"[matcher] {outcome}")
+            log.info("%s", outcome)
             return
         except NoDriverAvailable:
             driver_ids = []  # no offers this round, but still schedule the next
@@ -87,14 +91,16 @@ async def handle_ride_requested(payload: RideQueuePayload) -> None:
     # taken during the next 15s is caught on its way back.
     await ride_retry_queue.publish(payload)
 
-    print(f"[matcher] ride={payload.ride_id} round {payload.round_number}: "
-          f"offered to {len(offered)} of {len(driver_ids)} nearby driver(s)")
+    # The ride id is already in ctx=, so the message only says what happened.
+    log.info("round %d: offered to %d of %d nearby driver(s)",
+             payload.round_number, len(offered), len(driver_ids))
 
 
 async def main() -> None:
+    setup_logging("worker")
     await rabbitmq.connect()
     await ride_queue.subscribe(handle_ride_requested)
-    print(f"[matcher] consuming {ride_queue.name}")
+    log.info("consuming %s", ride_queue.name)
     try:
         await asyncio.Future()  # run until cancelled
     finally:

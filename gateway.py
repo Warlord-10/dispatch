@@ -29,6 +29,7 @@ should fetch its state over HTTP first; the socket carries only what changes.
 """
 
 import json
+import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
@@ -37,12 +38,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from config import GATEWAY_CONN_TTL_S
 from enums import Recipient
+from log_setup import log_context, setup_logging
 from messaging.connection import rabbitmq
 from messaging.push_queue import PushMessage, push_queue
 from schemas.drivers import DriverPing
 from services import connections as registry
 from services.drivers import record_ping
+
+log = logging.getLogger(__name__)
 
 GATEWAY_ID = ""  # set at startup, never at import: see the module docstring
 
@@ -68,17 +73,18 @@ async def deliver(msg: PushMessage) -> None:
     if not await push(msg.recipient, msg.recipient_id, msg.body):
         # Disconnected, or moved to another gateway, after the publisher looked
         # them up. Lost; their resync on reconnect covers it.
-        print(f"[{GATEWAY_ID}] {msg.recipient} {msg.recipient_id} not connected here, "
-              f"{msg.body.get('type')} dropped")
+        log.info("%s %s not connected here, %s dropped",
+                 msg.recipient, msg.recipient_id, msg.body.get("type"))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global GATEWAY_ID
     GATEWAY_ID = os.getenv("GATEWAY_ID") or f"gw-{uuid.uuid4().hex[:8]}"
+    setup_logging(GATEWAY_ID)  # every line names the gateway that wrote it
     await rabbitmq.connect()
     await push_queue.subscribe(GATEWAY_ID, deliver)
-    print(f"[{GATEWAY_ID}] ready")
+    log.info("ready")
     try:
         yield
     finally:
@@ -95,6 +101,7 @@ PingHandler = Callable[[WebSocket, int, dict], Awaitable[None]]
 async def _serve(ws: WebSocket, recipient: Recipient, recipient_id: int, on_ping: PingHandler) -> None:
     """One socket's whole life: register, answer pings, clean up."""
     await ws.accept()
+    log_context.set(f"{recipient}={recipient_id}")  # scoped to this socket's task
     key = (recipient, recipient_id)
     old = connections.get(key)
     connections[key] = ws  # a reconnect replaces the old socket
@@ -103,8 +110,11 @@ async def _serve(ws: WebSocket, recipient: Recipient, recipient_id: int, on_ping
             await old.close(code=4000)  # the same person twice: keep the newest
         except Exception:
             pass
-    await registry.register(recipient, recipient_id, GATEWAY_ID)
     try:
+        # Inside the try: if Redis is down the client gets a clean close and
+        # we get a log line, instead of an exception escaping into uvicorn.
+        await registry.register(recipient, recipient_id, GATEWAY_ID)
+        log.info("connected")
         while True:
             # Parsed by hand, not receive_json(): a malformed frame from a phone
             # gets an error reply, it does not tear down the connection.
@@ -121,14 +131,25 @@ async def _serve(ws: WebSocket, recipient: Recipient, recipient_id: int, on_ping
                 await on_ping(ws, recipient_id, msg)
             else:
                 await ws.send_json({"type": "error", "detail": f"unknown type {msg.get('type')!r}"})
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        log.info("disconnected (code %s)", exc.code)
+    except Exception:
+        log.exception("socket failed, closing")
+        try:
+            await ws.close(code=1011)  # 1011: server error, the client should reconnect
+        except Exception:
+            pass
     finally:
         # A reconnect has already registered a newer socket; this cleanup
         # belongs to the old one and must not remove it.
         if connections.get(key) is ws:
             del connections[key]
-            await registry.unregister(recipient, recipient_id, GATEWAY_ID)
+            try:
+                await registry.unregister(recipient, recipient_id, GATEWAY_ID)
+            except Exception:
+                # Never let cleanup mask what went wrong above. The entry is
+                # not stuck: it expires on its own.
+                log.exception("unregister failed, entry expires within %ds", GATEWAY_CONN_TTL_S)
 
 
 async def _driver_ping(ws: WebSocket, driver_id: int, msg: dict) -> None:

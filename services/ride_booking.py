@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -7,22 +8,25 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from enums import RideStatus
+from errors import DispatchError
 from models import Ride
 from schemas.rides import RideRequest
 from messaging.ride_queue import RideQueuePayload, ride_queue
 from services.drivers import free_driver
 from services.notifications import push_ride_update
 
+log = logging.getLogger(__name__)
 
-class RideNotFound(Exception):
+
+class RideNotFound(DispatchError):
     pass
 
 
-class InvalidRideState(Exception):
+class InvalidRideState(DispatchError):
     """The ride is not in a state where this transition is legal."""
 
 
-class IdempotencyKeyReused(Exception):
+class IdempotencyKeyReused(DispatchError):
     """Same Idempotency-Key, different request body: a client bug, not a retry."""
 
 
@@ -49,7 +53,8 @@ async def _publish(ride: Ride) -> None:
             )
         )
     except Exception as exc:
-        print(f"publish failed for ride {ride.id}: {exc!r}")
+        # ERROR: this ride is now stranded as pending with no worker to see it.
+        log.error("publish failed, ride %s will not be matched: %r", ride.id, exc)
 
 
 async def book_ride(
@@ -134,7 +139,7 @@ async def _transition(
     if row is None:
         await session.rollback()
         ride = await get_ride(session, ride_id)  # raises RideNotFound
-        raise InvalidRideState(f"cannot move a {ride.status} ride to {to}")
+        raise InvalidRideState(f"cannot move ride {ride_id} from {ride.status} to {to}")
 
     # free_driver commits, which commits the ride update with it: both or neither.
     if row.driver_id is not None:

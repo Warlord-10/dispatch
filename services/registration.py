@@ -9,16 +9,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from enums import DriverStatus
+from errors import DispatchError
 from models import Driver, Rider
 from schemas.registration import DriverRegister, RiderRegister
 
 
-class AlreadyRegistered(Exception):
+class AlreadyRegistered(DispatchError):
     """Phone number is already taken on that role."""
 
     def __init__(self, phone_number: str):
         self.phone_number = phone_number
-        super().__init__(f"{phone_number} is already registered")
+        super().__init__(f"phone number {phone_number} is already registered")
 
 
 async def _insert(session: AsyncSession, row: Driver | Rider, phone_number: str):

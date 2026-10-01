@@ -12,7 +12,7 @@ from models import Ride
 from services import offers
 from services.geo_index import search_drivers_in_radius
 from messaging.ride_queue import RideQueuePayload
-from services.ride_booking import timed_out_ride
+from services.ride_booking import RideNotFound, timed_out_ride
 
 
 # Outcomes of a round, not failures. The worker catches all three and acks;
@@ -38,7 +38,9 @@ async def dispatch_ride(session: AsyncSession, payload: RideQueuePayload) -> lis
     """
     ride = await session.get(Ride, payload.ride_id)
     if ride is None:
-        raise ValueError(f"ride {payload.ride_id} not found")
+        # A message for a ride that does not exist is a data problem, not a
+        # round outcome: let it fail, so the message is dead-lettered and logged.
+        raise RideNotFound(f"ride {payload.ride_id} not found")
 
     if ride.status != RideStatus.PENDING:
         raise RideNotPending(f"ride {ride.id} is {ride.status}")
